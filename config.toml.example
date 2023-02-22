@@ -1,0 +1,20 @@
+mqtthost = "192.168.1.1"
+
+[actions."Switch H"]
+toggle = [
+          ["Living Above Couch", "{ 'state': 'ON', 'brightness': 100, 'color':{'x':0.46618,'y':0.38401},'color_mode':'xy','color_temp':419 }"],
+	  ["Living Window", "{ 'state': 'ON', 'brightness': 100 }"],
+]
+brightness_up_click = [
+          ["Living Above Couch", "{ 'state': 'ON', 'brightness': 255 }"],
+	  ["Living Window", "{ 'state': 'ON', 'brightness': 255 }"],
+]
+brightness_down_click = [
+          ["Living Above Couch", "{ 'state': 'ON', 'brightness': 25 }"],
+	  ["Living Window", "{ 'state': 'ON', 'brightness': 25 }"],
+]
+brightness_down_hold = [
+          ["Living Above Couch", "{ 'state': 'OFF' }"],
+	  ["Living Window", "{ 'state': 'OFF' }"],
+]
+

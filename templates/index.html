@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html>
+	<meta name="viewport" content="width=device-width, user-scalable=no">
+	<head>
+<style>
+body {
+  touch-action: manipulation;
+}
+
+.modal {
+  justify-content: center;
+  width: 380px;
+  min-height: 250px;
+  position: absolute;
+  top: 0px;
+  background-color: white;
+  border: 1px solid #ddd;
+  border-radius: 15px;
+  z-index: 2;
+}
+
+.overlay {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 1;
+}
+
+.hidden {
+  display: none;
+}
+
+.stop-scrolling {
+  height: 100%;
+  overflow: hidden;
+}
+
+
+div.button {
+	border-width:2px;
+	border-style:solid;
+	border-color:black;
+	height: 80px;
+	width: 115px;
+	display:inline-block;
+	font-size: 18px;
+	margin-bottom: 5px;
+	background-color: gray;
+
+	  -webkit-user-select: none; /* Safari */
+  -ms-user-select: none; /* IE 10 and IE 11 */
+  user-select: none; /* Standard syntax */
+
+  text-align: center;
+vertical-align: middle;
+
+}
+
+</style>
+	<script>
+
+var longpress = false;
+
+function sendJSON(json_object) {
+	let xhr = new XMLHttpRequest();
+	let url = "/set-state";
+	xhr.open("POST", url, true);
+	xhr.setRequestHeader("Content-Type", "application/json");
+	xhr.onreadystatechange = function () {
+		if (xhr.readyState === 4 && xhr.status === 200) {
+			// Print received data from server
+			// result.innerHTML = this.responseText;
+		}
+	};
+	var data = JSON.stringify(json_object);
+	xhr.send(data);
+}
+
+function send_all_off(json_object) {
+	let xhr = new XMLHttpRequest();
+	let url = "/set-all-off";
+	xhr.open("POST", url, true);
+	xhr.setRequestHeader("Content-Type", "application/json");
+	xhr.onreadystatechange = function () {
+		if (xhr.readyState === 4 && xhr.status === 200) {
+			// Print received data from server
+			// result.innerHTML = this.responseText;
+		}
+	};
+	var data = JSON.stringify(json_object);
+	xhr.send(data);
+}
+
+function request_state_updates(json_object){
+	let xhr = new XMLHttpRequest();
+	let url = "/get-state";
+	xhr.open("POST", url, true);
+	xhr.setRequestHeader("Content-Type", "application/json");
+	xhr.onreadystatechange = function () {
+		if (xhr.readyState === 4 && xhr.status === 200) {
+			let data = this.responseText;
+			const obj = JSON.parse(data);
+			obj.devices.forEach(function (item, index) {
+				let elt = document.getElementById(item.html_id);
+				if(elt) {
+					try {
+						const payload = JSON.parse(item.last_payload);
+						// console.log("Element found... state: " + payload.state);
+				
+						let elt_in = document.getElementById(item.html_id + "_inner");
+						if (elt_in) {
+							elt_in.innerHTML = payload.brightness;
+						}
+					
+						if (payload.state == "ON") {
+							elt.style.backgroundColor = "red";
+						} else if (payload.state == "OFF") {
+							elt.style.backgroundColor = "white";
+						}
+					} catch (e) {
+						console.log("AYERROR " + e);
+					}
+					
+				}
+			});
+
+			setTimeout(request_state_updates, 300, { last_update: obj.last_update });
+		} else if (xhr.readyState === 4) {
+			setTimeout(request_state_updates, 3000);
+		} else {
+			// console.log("readyState: " + xhr.readyState + " , status: " + xhr.status);
+		}
+	};
+	xhr.onerror = function() {
+		console.log("ERROR XHR");
+	}
+
+	var data = JSON.stringify(json_object);
+	xhr.send(data);
+}
+
+function all_off(elt) {
+	send_all_off({});
+}
+
+function set_brightness(value) {
+	let target = document.getElementById("brightness_target");
+	let friendly_name = target.innerHTML;
+	sendJSON({ name: friendly_name, update: JSON.stringify({ brightness: value }) });
+}
+
+function longclick(elt) {
+	if (elt.id.endsWith("_inner")) {
+		elt = elt.parentElement;
+	}
+
+	let friendly_name = elt.id.replaceAll("_", " ");
+		
+	let modal = document.querySelector(".modal");
+	let overlay = document.querySelector(".overlay");
+	modal.classList.remove("hidden");
+	overlay.classList.remove("hidden");
+	var rect = elt.getBoundingClientRect();
+	modal.style.top = window.scrollY + "px";
+	document.body.classList.add("stop-scrolling");
+	let target = document.getElementById("brightness_target");
+
+	target.innerHTML = friendly_name;
+}
+
+function closemodal() {
+	let modal = document.querySelector(".modal");
+	let overlay = document.querySelector(".overlay");
+	modal.classList.add("hidden");
+	overlay.classList.add("hidden");
+	document.body.classList.remove("stop-scrolling");
+}
+		
+function testclick(elt) {
+	let friendly_name = elt.id.replaceAll("_", " ");
+	console.debug("long press: " + longpress + " Friendly name: " + friendly_name); 
+
+	if (longpress) {
+	} else {
+		if (elt.style.backgroundColor != "red") {
+			// elt.style.backgroundColor = "red";
+			sendJSON({ name: friendly_name, update: JSON.stringify({ state: "ON" }) });
+			// sendJSON({ name: friendly_name, update: JSON.stringify({ brightness: 255 }) });
+		} else {
+			// elt.style.backgroundColor = "white";
+			sendJSON({ name: friendly_name, update: JSON.stringify({ state: "OFF" }) });
+			// sendJSON({ name: friendly_name, update: JSON.stringify({ brightness: 0 }) });
+		};
+	}
+}
+
+
+
+var presstimer = null;
+var longtarget = null;
+
+
+var cancel_func = function(e) {
+    if (presstimer !== null) {
+        clearTimeout(presstimer);
+        presstimer = null;
+    }
+};
+
+var click_func = function(e) {
+    if (presstimer !== null) {
+        clearTimeout(presstimer);
+        presstimer = null;
+    }
+    if (longpress) {
+        return false;
+    }
+
+    // alert("press");
+};
+
+var start_func = function(e) {
+    console.log(e);
+
+    if (e.type === "click" && e.button !== 0) {
+        return;
+    }
+
+    longpress = false;
+
+    if (presstimer === null) {
+        presstimer = setTimeout(function() {
+            // alert("long click");
+		longpress = true;
+		longclick(e.target);
+        }, 1000);
+    }
+
+    return false;
+};
+
+function add_long_press(node) {
+	// console.log("Add long press: " + node);
+	node.addEventListener("mousedown", start_func);
+	node.addEventListener("touchstart", start_func);
+	node.addEventListener("click", click_func);
+	node.addEventListener("mouseout", cancel_func);
+	node.addEventListener("touchend", cancel_func);
+	node.addEventListener("touchleave", cancel_func);
+	node.addEventListener("touchcancel", cancel_func);
+}
+
+
+function body_init() {
+	var nodes = document.getElementsByTagName("DIV");
+	for (var i=0; i<nodes.length; i++) {        
+		add_long_press(nodes[i]);
+	}
+	setTimeout(request_state_updates, 300);
+}
+
+	</script>
+	</head>
+	<body onload="body_init()">
+		<div class="button" id="all_off" onclick="all_off(this)">Turn all off</div>
+		{{#each rooms as |room|}}
+		<h1>{{@key}}</h1>
+                    {{#each room.device_names as |devname|}}
+		    {{#with (lookup ../../devices devname) as |dev|}}
+		    <div class="button" id="{{dev.html_id}}" onclick="testclick(this)">{{dev.short_name}}
+			    <br/>
+			    <span id="{{dev.html_id}}_inner"></span>
+		    </div>
+
+		    {{/with}}
+                    {{/each}}
+
+
+		{{/each}}
+
+		
+<section class="modal hidden">
+  <div class="flex">
+    <button class="btn-close" onclick="closemodal()">⨉</button>
+  </div>
+  <div>
+	  <h3>change brightness for <span id="brightness_target"></span></h3>
+    <p>
+    <div class="button" onclick="set_brightness(1)">1</div>
+    <div class="button" onclick="set_brightness(5)">5</div>
+    <div class="button" onclick="set_brightness(10)">10</div>
+    <div class="button" onclick="set_brightness(20)">20</div>
+    <div class="button" onclick="set_brightness(50)">50</div>
+    <div class="button" onclick="set_brightness(100)">100</div>
+    <div class="button" onclick="set_brightness(150)">150</div>
+    <div class="button" onclick="set_brightness(200)">200</div>
+    <div class="button" onclick="set_brightness(255)">255</div>
+    
+    </p>
+  </div>
+
+  <button class="btn" onclick="closemodal()">Close</button>
+</section>
+
+<div class="overlay hidden"></div>
+	</body>
+</html>
