@@ -116,11 +116,14 @@ function request_state_updates(json_object){
 						if (elt_in) {
 							elt_in.innerHTML = payload.brightness;
 						}
-					
-						if (payload.state == "ON") {
-							elt.style.backgroundColor = "red";
-						} else if (payload.state == "OFF") {
-							elt.style.backgroundColor = "white";
+						if (item.last_payload_update.secs_since_epoch >= item.last_req_sent.secs_since_epoch) {
+							if (payload.state == "ON") {
+								elt.style.backgroundColor = "red";
+							} else if (payload.state == "OFF") {
+								elt.style.backgroundColor = "white";
+							}
+						} else {
+							elt.style.backgroundColor = "gray";
 						}
 					} catch (e) {
 						console.log("AYERROR " + e);

@@ -98,7 +98,9 @@ fn get_render_device(d: &DeviceEntry) -> Option<RenderDeviceEntry> {
     let device = d;
     let last_payload = format!("");
     let last_payload_update = SystemTime::now();
-    let last_req_sent = last_payload_update;
+    let last_req_sent = SystemTime::UNIX_EPOCH
+        .checked_add(Duration::from_secs(1000))
+        .unwrap();
     Some(RenderDeviceEntry {
         device,
         room_name,
@@ -164,13 +166,14 @@ struct Device {
 
 async fn set_state(mut req: Request<Arc<Mutex<AyTestState>>>) -> tide::Result {
     let Device { name, update } = req.body_json().await?;
-    println!("Change state for {}", &name);
+    println!("Change state for {}: {}", &name, &update);
 
     let payload = update.clone();
     let target = format!("zigbee2mqtt/{}/set", &name);
     let mut state = req.state().lock().await;
     if let Some(dev) = state.data.devices.get_mut(&name) {
         dev.last_req_sent = SystemTime::now();
+        println!("Set req sent to: {:?}", &dev.last_req_sent);
         let client = state.client.clone();
         task::spawn(async move {
             client
