@@ -23,6 +23,7 @@ use std::time::SystemTime;
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct Config {
     mqtthost: String,
+    client_name: Option<String>,
     actions: HashMap<String, HashMap<String, Vec<(String, String)>>>,
 }
 
@@ -270,8 +271,9 @@ async fn main() {
     let config: Config = toml::from_str(&cfg).unwrap();
 
     println!("Config: {:?}", &config);
+    let client_name = config.client_name.unwrap_or("homegui-rs".to_string());
 
-    let mut mqttoptions = MqttOptions::new("homegui-rs", config.mqtthost, 1883);
+    let mut mqttoptions = MqttOptions::new(&client_name, config.mqtthost, 1883);
     mqttoptions.set_keep_alive(Duration::from_secs(5));
     mqttoptions.set_max_packet_size(1000000, 1000000);
 
