@@ -17,7 +17,7 @@ toml = "*"
 
 tide = "*"
 tempfile = "*"
-handlebars = { version = "*", features = ["dir_source"] }
+handlebars = { version = "4.3", features = ["dir_source"] }
 tide-handlebars = "*"
 surf = "*"
 http-types = "*"
