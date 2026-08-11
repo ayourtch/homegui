@@ -13,7 +13,7 @@ use tide::{Body, Request, Response, StatusCode};
 
 use async_std::sync::Arc;
 use async_std::sync::Mutex;
-use handlebars::{handlebars_helper, Handlebars, JsonRender};
+use handlebars::{handlebars_helper, Handlebars};
 use std::collections::BTreeMap;
 use tempfile::TempDir;
 use tide_handlebars::prelude::*;
@@ -334,10 +334,29 @@ async fn main() {
     }
 
     loop {
-        let notification = eventloop.poll().await.unwrap();
+        let notification = match eventloop.poll().await {
+            Ok(n) => n,
+            Err(e) => {
+                println!("MQTT connection error: {:?}; reconnecting in 2s", e);
+                async_std::task::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+        };
         println!("Received = {:?}", notification);
         match notification {
             rumqttc::Event::Incoming(incoming) => match incoming {
+                rumqttc::Packet::ConnAck(_) => {
+                    println!("MQTT (re)connected; subscribing");
+                    let _ = client
+                        .subscribe("zigbee2mqtt/bridge/Xlogging", QoS::AtMostOnce)
+                        .await;
+                    let _ = client
+                        .subscribe("zigbee2mqtt/bridge/devices", QoS::AtMostOnce)
+                        .await;
+                    let _ = client
+                        .subscribe("zigbee2mqtt/+", QoS::AtMostOnce)
+                        .await;
+                }
                 rumqttc::Packet::Publish(publish) => {
                     if publish.topic == "zigbee2mqtt/bridge/devices" {
                         let devices: Vec<DeviceEntry> =
