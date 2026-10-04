@@ -25,6 +25,170 @@ pub struct Config {
     mqtthost: String,
     client_name: Option<String>,
     actions: HashMap<String, HashMap<String, Vec<(String, String)>>>,
+    #[serde(default)]
+    autodim: AutoDimConfig,
+}
+
+/// Evening auto-dim: once a day, at or after `time` (local), every light that is ON
+/// in one of `rooms` and brighter than `brightness_percent` is dimmed to it.
+/// It never raises a light that is already dimmer. If the time is missed (service
+/// down, restarted late), it still runs later the same day: `flag_file` holds the
+/// date of the last run, so it runs at most once per day across restarts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AutoDimConfig {
+    enabled: bool,
+    /// "HH:MM", local time of this machine
+    time: String,
+    brightness_percent: u8,
+    /// room = first word of the friendly name ("Living Window - 0x..." is in "Living")
+    rooms: Vec<String>,
+    flag_file: String,
+}
+
+impl Default for AutoDimConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            time: "22:00".to_string(),
+            brightness_percent: 30,
+            rooms: vec!["Living".to_string(), "Kitchen".to_string()],
+            flag_file: "autodim-last-run".to_string(),
+        }
+    }
+}
+
+/// "HH:MM" -> minutes since midnight.
+fn parse_hhmm(s: &str) -> Option<u32> {
+    let (h, m) = s.trim().split_once(':')?;
+    let (h, m): (u32, u32) = (h.trim().parse().ok()?, m.trim().parse().ok()?);
+    if h < 24 && m < 60 {
+        Some(h * 60 + m)
+    } else {
+        None
+    }
+}
+
+/// zigbee2mqtt brightness is 0..=254.
+fn percent_to_level(percent: u8) -> u64 {
+    (percent.min(100) as u64 * 254 + 50) / 100
+}
+
+/// Local date ("YYYY-MM-DD") and minutes since midnight, from the system clock and
+/// time zone (via `date`, so no time-zone crate is needed).
+fn local_now() -> Option<(String, u32)> {
+    let out = std::process::Command::new("date")
+        .arg("+%F %H:%M")
+        .output()
+        .ok()?;
+    let text = String::from_utf8(out.stdout).ok()?;
+    let (date, time) = text.trim().split_once(' ')?;
+    Some((date.to_string(), parse_hhmm(time)?))
+}
+
+/// Due when it is at or past the dim time and the last run was not today.
+fn autodim_due(today: &str, now_min: u32, at_min: u32, last_run: Option<&str>) -> bool {
+    now_min >= at_min && last_run.map(str::trim) != Some(today)
+}
+
+/// Lights to dim: in one of `rooms`, reported ON, and brighter than `level`.
+/// A light whose state or brightness is not known yet is left alone.
+fn autodim_targets(
+    devices: &HashMap<String, RenderDeviceEntry>,
+    rooms: &[String],
+    level: u64,
+) -> Vec<String> {
+    let mut names: Vec<String> = devices
+        .iter()
+        .filter(|(_, dev)| rooms.iter().any(|r| r == &dev.room_name))
+        .filter(|(_, dev)| {
+            let payload: Value = match serde_json::from_str(&dev.last_payload) {
+                Ok(v) => v,
+                Err(_) => return false,
+            };
+            payload["state"] == "ON"
+                && payload["brightness"].as_u64().map_or(false, |b| b > level)
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+    names.sort();
+    names
+}
+
+fn autodim_status(cfg: &AutoDimConfig, done_today: bool) -> String {
+    if !cfg.enabled {
+        return "Auto-dim is off".to_string();
+    }
+    format!(
+        "Auto-dim at {} to {}% ({}): {}",
+        cfg.time,
+        cfg.brightness_percent,
+        cfg.rooms.join(", "),
+        if done_today { "done today" } else { "not yet today" }
+    )
+}
+
+async fn autodim_loop(state: Arc<Mutex<AyTestState>>, client: AsyncClient, cfg: AutoDimConfig) {
+    let at = match parse_hhmm(&cfg.time) {
+        Some(at) => at,
+        None => {
+            println!("autodim: cannot parse time {:?}; auto-dim disabled", cfg.time);
+            state.lock().await.data.autodim_status =
+                format!("Auto-dim is off (bad time {:?} in config)", cfg.time);
+            return;
+        }
+    };
+    let level = percent_to_level(cfg.brightness_percent);
+    let started = std::time::Instant::now();
+    // Also remembered in memory: if the flag file cannot be written, it must not
+    // re-dim every 30 s for the rest of the evening.
+    let mut ran_on: Option<String> = None;
+    loop {
+        let Some((today, now)) = local_now() else {
+            println!("autodim: cannot read the local time");
+            task::sleep(Duration::from_secs(30)).await;
+            continue;
+        };
+        let last_run = std::fs::read_to_string(&cfg.flag_file).ok();
+        let done_today = ran_on.as_deref() == Some(today.as_str())
+            || last_run.as_deref().map(str::trim) == Some(today.as_str());
+        let mut st = state.lock().await;
+        st.data.autodim_status = autodim_status(&cfg, done_today);
+        // Wait a minute after start so the lights have reported their state; the
+        // device list must be in too.
+        let ready = started.elapsed() >= Duration::from_secs(60) && !st.data.devices.is_empty();
+        if ready && !done_today && autodim_due(&today, now, at, last_run.as_deref()) {
+            let names = autodim_targets(&st.data.devices, &cfg.rooms, level);
+            let payload = format!("{{ \"brightness\": {} }}", level);
+            for name in &names {
+                if let Some(dev) = st.data.devices.get_mut(name) {
+                    dev.last_req_sent = SystemTime::now();
+                }
+                let target = format!("zigbee2mqtt/{}/set", name);
+                let client = client.clone();
+                let payload = payload.clone();
+                task::spawn(async move {
+                    if let Err(e) = client
+                        .publish(&target, QoS::AtMostOnce, false, payload.as_bytes())
+                        .await
+                    {
+                        println!("autodim: publish to {} failed: {:?}", target, e);
+                    }
+                });
+            }
+            println!("autodim: {} dimmed {} light(s) to {}: {:?}", today, names.len(), level, names);
+            ran_on = Some(today.clone());
+            let tmp = format!("{}.tmp", &cfg.flag_file);
+            if let Err(e) = std::fs::write(&tmp, format!("{}\n", today))
+                .and_then(|_| std::fs::rename(&tmp, &cfg.flag_file))
+            {
+                println!("autodim: cannot write flag file {}: {:?}", &cfg.flag_file, e);
+            }
+            st.data.autodim_status = autodim_status(&cfg, true);
+        }
+        drop(st);
+        task::sleep(Duration::from_secs(30)).await;
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -121,6 +285,7 @@ struct RoomRenderData {
 struct RenderData {
     devices: HashMap<String, RenderDeviceEntry>,
     rooms: HashMap<String, RoomRenderData>,
+    autodim_status: String,
 }
 
 #[derive(Clone)]
@@ -144,6 +309,7 @@ impl AyTestState {
             data: RenderData {
                 rooms: HashMap::new(),
                 devices: HashMap::new(),
+                autodim_status: String::new(),
             },
         }
     }
@@ -316,8 +482,13 @@ async fn main() {
         .register_templates_directory("", "./templates/")
         .unwrap();
 
+    state.data.autodim_status = autodim_status(&config.autodim, false);
     let mut state = Arc::new(Mutex::new(state));
     let mut iot_state = state.clone();
+
+    if config.autodim.enabled {
+        task::spawn(autodim_loop(state.clone(), client.clone(), config.autodim.clone()));
+    }
 
     let mut app = tide::with_state(state);
     app.at("/").get(root_req);
@@ -478,5 +649,83 @@ async fn main() {
                 println!("All other notification: {:?}", &x);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dev(friendly: &str, payload: &str) -> (String, RenderDeviceEntry) {
+        let entry = DeviceEntry {
+            ieee_address: "0x1".into(),
+            typ: "Router".into(),
+            network_address: 1,
+            supported: true,
+            friendly_name: friendly.into(),
+        };
+        let mut d = get_render_device(&entry).expect("a light name");
+        d.last_payload = payload.into();
+        (friendly.to_string(), d)
+    }
+
+    #[test]
+    fn hhmm() {
+        assert_eq!(parse_hhmm("22:00"), Some(1320));
+        assert_eq!(parse_hhmm(" 7:05 "), Some(425));
+        assert_eq!(parse_hhmm("24:00"), None);
+        assert_eq!(parse_hhmm("22"), None);
+    }
+
+    #[test]
+    fn percent_scale() {
+        assert_eq!(percent_to_level(30), 76);
+        assert_eq!(percent_to_level(100), 254);
+        assert_eq!(percent_to_level(0), 0);
+        assert_eq!(percent_to_level(250), 254);
+    }
+
+    #[test]
+    fn due_once_a_day_and_catches_up() {
+        let at = 22 * 60;
+        assert!(!autodim_due("2026-10-04", 21 * 60 + 59, at, None), "not before the time");
+        assert!(autodim_due("2026-10-04", 22 * 60, at, None), "at the time");
+        assert!(autodim_due("2026-10-04", 23 * 60 + 30, at, Some("2026-10-03\n")), "late, missed today");
+        assert!(!autodim_due("2026-10-04", 23 * 60, at, Some("2026-10-04\n")), "already ran today");
+        assert!(!autodim_due("2026-10-05", 30, at, Some("2026-10-04")), "after midnight: next day, before time");
+    }
+
+    #[test]
+    fn targets_only_on_brighter_lights_in_the_rooms() {
+        let devices: HashMap<String, RenderDeviceEntry> = [
+            dev("Living Window - 0x01", r#"{"state":"ON","brightness":200}"#),
+            dev("Living Above Couch - 0x02", r#"{"state":"ON","brightness":40}"#),
+            dev("Kitchen 1 - 0x03", r#"{"brightness":254,"state":"ON"}"#),
+            dev("Kitchen 2 - 0x04", r#"{"state":"OFF","brightness":254}"#),
+            dev("Kitchen Plug - 0x05", r#"{"state":"ON"}"#),
+            dev("Kitchen 3 - 0x06", ""),
+            dev("BBe Top 1 - 0x07", r#"{"state":"ON","brightness":254}"#),
+        ]
+        .into_iter()
+        .collect();
+        let rooms = vec!["Living".to_string(), "Kitchen".to_string()];
+        assert_eq!(
+            autodim_targets(&devices, &rooms, 76),
+            vec!["Kitchen 1 - 0x03".to_string(), "Living Window - 0x01".to_string()]
+        );
+    }
+
+    #[test]
+    fn config_defaults_and_overrides() {
+        let c: Config = toml::from_str("mqtthost = \"x\"\n[actions]\n").unwrap();
+        assert!(c.autodim.enabled);
+        assert_eq!(c.autodim.time, "22:00");
+        assert_eq!(c.autodim.brightness_percent, 30);
+        let c: Config = toml::from_str(
+            "mqtthost = \"x\"\n[actions]\n[autodim]\ntime = \"21:30\"\nbrightness_percent = 20\n",
+        )
+        .unwrap();
+        assert_eq!((c.autodim.time.as_str(), c.autodim.brightness_percent), ("21:30", 20));
+        assert_eq!(c.autodim.rooms, vec!["Living", "Kitchen"], "unset keys keep defaults");
     }
 }
