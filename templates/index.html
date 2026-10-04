@@ -333,7 +333,7 @@ function closemodal() {
 function testclick(elt) {
 	let friendly_name = elt.id.replaceAll("_", " ");
 	console.debug("long press: " + longpress + " Friendly name: " + friendly_name);
-	if (longpress) {
+	if (longpress || elt.dataset.state == "offline") {
 		return;
 	}
 	if (elt.dataset.state != "on") {

@@ -95,7 +95,7 @@ fn autodim_due(today: &str, now_min: u32, at_min: u32, last_run: Option<&str>) -
     now_min >= at_min && last_run.map(str::trim) != Some(today)
 }
 
-/// Lights to dim: in one of `rooms`, reported ON, and brighter than `level`.
+/// Lights to dim: in one of `rooms`, online, reported ON, and brighter than `level`.
 /// A light whose state or brightness is not known yet is left alone.
 fn autodim_targets(
     devices: &HashMap<String, RenderDeviceEntry>,
@@ -105,6 +105,8 @@ fn autodim_targets(
     let mut names: Vec<String> = devices
         .iter()
         .filter(|(_, dev)| rooms.iter().any(|r| r == &dev.room_name))
+        // An offline light keeps its last report; a command to it stalls zigbee2mqtt.
+        .filter(|(_, dev)| dev.available)
         .filter(|(_, dev)| {
             let payload: Value = match serde_json::from_str(&dev.last_payload) {
                 Ok(v) => v,
@@ -182,7 +184,8 @@ fn restore_plan(
         .filter(|(name, _)| {
             devices.get(name).map_or(false, |dev| {
                 let p = payload_of(dev);
-                p["state"] == "ON"
+                dev.available
+                    && p["state"] == "ON"
                     && p["brightness"].as_u64().map_or(false, |b| b.abs_diff(level) <= 2)
             })
         })
@@ -453,6 +456,11 @@ async fn set_state(mut req: Request<Arc<Mutex<AyTestState>>>) -> tide::Result {
     let payload = update.clone();
     let target = format!("zigbee2mqtt/{}/set", &name);
     let mut state = req.state().lock().await;
+    if state.data.devices.get(&name).map_or(false, |dev| !dev.available) {
+        // A light switched off at the wall: a command to it stalls zigbee2mqtt.
+        println!("Device {} is offline, not sending", &name);
+        return Ok(format!("{} is offline", name).into());
+    }
     if let Some(dev) = state.data.devices.get_mut(&name) {
         dev.last_req_sent = SystemTime::now();
         println!("Set req sent to: {:?}", &dev.last_req_sent);
@@ -474,7 +482,7 @@ async fn set_all_off(mut req: Request<Arc<Mutex<AyTestState>>>) -> tide::Result 
     let mut state = req.state().lock().await;
     let client = state.client.clone();
     for (name, ref mut dev) in &mut state.data.devices {
-        if dev.last_req_sent < dev.last_payload_update {
+        if dev.available && dev.last_req_sent < dev.last_payload_update {
             let name = format!("{}", &dev.device.friendly_name);
             let payload = format!("{{ \"state\": \"{}\" }}", "OFF");
             let target = format!("zigbee2mqtt/{}/set", &name);
@@ -894,9 +902,12 @@ mod tests {
             dev("Living At Target - 0x08", r#"{"state":"ON","brightness":76}"#),
             dev("Living Just Above - 0x09", r#"{"state":"ON","brightness":77}"#),
             dev("Kitchen No State - 0x0a", r#"{"brightness":200}"#),
+            dev("Kitchen Offline - 0x0b", r#"{"state":"ON","brightness":254}"#),
         ]
         .into_iter()
         .collect();
+        let mut devices = devices;
+        devices.get_mut("Kitchen Offline - 0x0b").unwrap().available = false;
         let rooms = vec!["Living".to_string(), "Kitchen".to_string()];
         assert_eq!(
             autodim_targets(&devices, &rooms, 76),
@@ -954,6 +965,9 @@ mod tests {
         ]
         .into_iter()
         .collect();
+        let mut off_wall = after.clone();
+        off_wall.get_mut("Living A - 0x01").unwrap().available = false;
+        assert!(restore_plan(&saved, &off_wall, 76).is_empty(), "an offline light is not restored");
         assert_eq!(
             restore_plan(&saved, &after, 76),
             vec![("Living A - 0x01".to_string(), 200)],
