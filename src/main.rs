@@ -115,6 +115,17 @@ fn autodim_targets(
     names
 }
 
+/// True when every light in  has reported a state since start. After a
+/// restart the replies to the startup "get" trickle in over minutes (measured
+/// 2026-10-04: 2 of 25 known at 60 s, 19 of 25 at 3 min), so dimming early would
+/// miss lights and still mark the day done.
+fn room_states_known(devices: &HashMap<String, RenderDeviceEntry>, rooms: &[String]) -> bool {
+    devices
+        .values()
+        .filter(|dev| rooms.iter().any(|r| r == &dev.room_name))
+        .all(|dev| !dev.last_payload.is_empty())
+}
+
 fn autodim_status(cfg: &AutoDimConfig, done_today: bool) -> String {
     if !cfg.enabled {
         return "Auto-dim is off".to_string();
@@ -154,9 +165,14 @@ async fn autodim_loop(state: Arc<Mutex<AyTestState>>, client: AsyncClient, cfg: 
             || last_run.as_deref().map(str::trim) == Some(today.as_str());
         let mut st = state.lock().await;
         st.data.autodim_status = autodim_status(&cfg, done_today);
-        // Wait a minute after start so the lights have reported their state; the
-        // device list must be in too.
-        let ready = started.elapsed() >= Duration::from_secs(60) && !st.data.devices.is_empty();
+        // Wait for the device list and for the lights to report their state. Some
+        // never answer the startup "get" (an unpowered lamp), so give up waiting
+        // after 10 minutes and dim the ones that did.
+        let waited = started.elapsed();
+        let ready = !st.data.devices.is_empty()
+            && waited >= Duration::from_secs(60)
+            && (room_states_known(&st.data.devices, &cfg.rooms)
+                || waited >= Duration::from_secs(600));
         if ready && !done_today && autodim_due(&today, now, at, last_run.as_deref()) {
             let names = autodim_targets(&st.data.devices, &cfg.rooms, level);
             let payload = format!("{{ \"brightness\": {} }}", level);
@@ -500,7 +516,10 @@ async fn main() {
     {
         let client = client.clone();
         task::spawn(async move {
-            app.listen("0.0.0.0:8989").await.unwrap();
+            // HOMEGUI_LISTEN lets a test copy run beside the live one.
+            let listen =
+                std::env::var("HOMEGUI_LISTEN").unwrap_or_else(|_| "0.0.0.0:8989".to_string());
+            app.listen(listen).await.unwrap();
         });
     }
 
@@ -705,14 +724,35 @@ mod tests {
             dev("Kitchen Plug - 0x05", r#"{"state":"ON"}"#),
             dev("Kitchen 3 - 0x06", ""),
             dev("BBe Top 1 - 0x07", r#"{"state":"ON","brightness":254}"#),
+            dev("Living At Target - 0x08", r#"{"state":"ON","brightness":76}"#),
+            dev("Living Just Above - 0x09", r#"{"state":"ON","brightness":77}"#),
+            dev("Kitchen No State - 0x0a", r#"{"brightness":200}"#),
         ]
         .into_iter()
         .collect();
         let rooms = vec!["Living".to_string(), "Kitchen".to_string()];
         assert_eq!(
             autodim_targets(&devices, &rooms, 76),
-            vec!["Kitchen 1 - 0x03".to_string(), "Living Window - 0x01".to_string()]
+            vec![
+                "Kitchen 1 - 0x03".to_string(),
+                "Living Just Above - 0x09".to_string(),
+                "Living Window - 0x01".to_string()
+            ]
         );
+    }
+
+    #[test]
+    fn waits_for_room_lights_only() {
+        let rooms = vec!["Living".to_string()];
+        let mut devices: HashMap<String, RenderDeviceEntry> = [
+            dev("Living Window - 0x01", r#"{"state":"ON","brightness":200}"#),
+            dev("Kitchen 1 - 0x03", ""),
+        ]
+        .into_iter()
+        .collect();
+        assert!(room_states_known(&devices, &rooms), "an unknown light in another room does not block");
+        devices.extend([dev("Living Lamp - 0x02", "")]);
+        assert!(!room_states_known(&devices, &rooms), "an unknown light in the room blocks");
     }
 
     #[test]

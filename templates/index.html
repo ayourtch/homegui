@@ -1,150 +1,248 @@
 <!DOCTYPE html>
 <html>
-	<meta name="viewport" content="width=device-width, user-scalable=no">
-	<head>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, user-scalable=no">
+<title>Lights</title>
 <style>
+:root {
+  --bg: #f3f1ec;
+  --card: #ffffff;
+  --text: #24221f;
+  --muted: #77736b;
+  --line: #dedad2;
+  --on: #f6b73c;
+  --on-bg: #fff4dc;
+  --pending: #c9c5bd;
+  --danger: #c2412d;
+  --shadow: 0 1px 2px rgba(0,0,0,0.06), 0 2px 8px rgba(0,0,0,0.05);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161514;
+    --card: #23211f;
+    --text: #ece9e3;
+    --muted: #9a958c;
+    --line: #34312d;
+    --on: #f6b73c;
+    --on-bg: #3a2f17;
+    --pending: #4a4641;
+    --danger: #e0644f;
+    --shadow: none;
+  }
+}
+
+* { box-sizing: border-box; }
+
 body {
+  margin: 0;
+  padding: 16px;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.3 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   touch-action: manipulation;
 }
 
-.modal {
-  justify-content: center;
-  width: 380px;
-  min-height: 250px;
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.autodim {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+h1 {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 22px 0 10px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(115px, 1fr));
+  gap: 10px;
+}
+
+div.button {
+  -webkit-user-select: none;
+  -ms-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  cursor: pointer;
+}
+
+.light {
+  position: relative;
+  min-height: 84px;
+  padding: 12px 12px 10px;
+  border-radius: 14px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  transition: background-color 0.15s, border-color 0.15s, transform 0.05s;
+}
+.light:active { transform: scale(0.97); }
+.light .name { font-size: 17px; font-weight: 500; }
+.light .level { font-size: 13px; color: var(--muted); min-height: 1em; }
+.light .dot {
   position: absolute;
-  top: 0px;
-  background-color: white;
-  border: 1px solid #ddd;
-  border-radius: 15px;
+  top: 12px;
+  right: 12px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--line);
+}
+.light[data-state="on"] { background: var(--on-bg); border-color: var(--on); }
+.light[data-state="on"] .dot { background: var(--on); box-shadow: 0 0 8px var(--on); }
+.light[data-state="off"] .level { visibility: hidden; }
+.light[data-state="pending"] { border-style: dashed; }
+.light[data-state="pending"] .dot { background: var(--pending); }
+
+.alloff {
+  padding: 12px 20px;
+  border-radius: 999px;
+  border: 1px solid var(--danger);
+  color: var(--danger);
+  background: var(--card);
+  font-weight: 600;
+}
+.alloff:active { background: var(--danger); color: #fff; }
+
+.modal {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(380px, calc(100% - 32px));
+  margin-top: 16px;
+  padding: 18px;
+  background: var(--card);
+  color: var(--text);
+  border-radius: 18px;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.3);
   z-index: 2;
+}
+.modal h3 { margin: 0 0 14px; font-size: 17px; font-weight: 600; padding-right: 36px; }
+.modal .levels {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+.modal .levels div.button {
+  padding: 14px 0;
+  text-align: center;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  font-weight: 500;
+}
+.modal .levels div.button:active { background: var(--on-bg); border-color: var(--on); }
+.btn-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 16px;
+}
+.btn {
+  width: 100%;
+  margin-top: 14px;
+  padding: 12px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 16px;
 }
 
 .overlay {
   position: fixed;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  width: 100%;
-  height: 100%;
+  inset: 0;
   background: rgba(0, 0, 0, 0.5);
   z-index: 1;
 }
-
-.hidden {
-  display: none;
-}
-
-.stop-scrolling {
-  height: 100%;
-  overflow: hidden;
-}
-
-
-div.button {
-	border-width:2px;
-	border-style:solid;
-	border-color:black;
-	height: 80px;
-	width: 115px;
-	display:inline-block;
-	font-size: 18px;
-	margin-bottom: 5px;
-	background-color: gray;
-
-	  -webkit-user-select: none; /* Safari */
-  -ms-user-select: none; /* IE 10 and IE 11 */
-  user-select: none; /* Standard syntax */
-
-  text-align: center;
-vertical-align: middle;
-
-}
-
+.hidden { display: none; }
+.stop-scrolling { height: 100%; overflow: hidden; }
 </style>
-	<script>
+<script>
 
 var longpress = false;
 
+// Brightness is 0..254 on the wire; the UI shows percent.
+function to_percent(b) {
+	return Math.round(b * 100 / 254) + "%";
+}
+
 function sendJSON(json_object) {
 	let xhr = new XMLHttpRequest();
-	let url = "/set-state";
-	xhr.open("POST", url, true);
+	xhr.open("POST", "/set-state", true);
 	xhr.setRequestHeader("Content-Type", "application/json");
-	xhr.onreadystatechange = function () {
-		if (xhr.readyState === 4 && xhr.status === 200) {
-			// Print received data from server
-			// result.innerHTML = this.responseText;
-		}
-	};
-	var data = JSON.stringify(json_object);
-	xhr.send(data);
+	xhr.send(JSON.stringify(json_object));
 }
 
 function send_all_off(json_object) {
 	let xhr = new XMLHttpRequest();
-	let url = "/set-all-off";
-	xhr.open("POST", url, true);
+	xhr.open("POST", "/set-all-off", true);
 	xhr.setRequestHeader("Content-Type", "application/json");
-	xhr.onreadystatechange = function () {
-		if (xhr.readyState === 4 && xhr.status === 200) {
-			// Print received data from server
-			// result.innerHTML = this.responseText;
-		}
-	};
-	var data = JSON.stringify(json_object);
-	xhr.send(data);
+	xhr.send(JSON.stringify(json_object));
 }
 
 function request_state_updates(json_object){
 	let xhr = new XMLHttpRequest();
-	let url = "/get-state";
-	xhr.open("POST", url, true);
+	xhr.open("POST", "/get-state", true);
 	xhr.setRequestHeader("Content-Type", "application/json");
 	xhr.onreadystatechange = function () {
 		if (xhr.readyState === 4 && xhr.status === 200) {
-			let data = this.responseText;
-			const obj = JSON.parse(data);
-			obj.devices.forEach(function (item, index) {
+			const obj = JSON.parse(this.responseText);
+			obj.devices.forEach(function (item) {
 				let elt = document.getElementById(item.html_id);
-				if(elt) {
+				if (elt) {
 					try {
 						const payload = JSON.parse(item.last_payload);
-						// console.log("Element found... state: " + payload.state);
-				
 						let elt_in = document.getElementById(item.html_id + "_inner");
-						if (elt_in) {
-							elt_in.innerHTML = payload.brightness;
+						if (elt_in && payload.brightness !== undefined) {
+							elt_in.textContent = to_percent(payload.brightness);
 						}
 						if (item.last_payload_update.secs_since_epoch >= item.last_req_sent.secs_since_epoch) {
 							if (payload.state == "ON") {
-								elt.style.backgroundColor = "red";
+								elt.dataset.state = "on";
 							} else if (payload.state == "OFF") {
-								elt.style.backgroundColor = "white";
+								elt.dataset.state = "off";
 							}
 						} else {
-							elt.style.backgroundColor = "gray";
+							elt.dataset.state = "pending";
 						}
 					} catch (e) {
 						console.log("AYERROR " + e);
 					}
-					
 				}
 			});
-
 			setTimeout(request_state_updates, 300, { last_update: obj.last_update });
 		} else if (xhr.readyState === 4) {
 			setTimeout(request_state_updates, 3000);
-		} else {
-			// console.log("readyState: " + xhr.readyState + " , status: " + xhr.status);
 		}
 	};
 	xhr.onerror = function() {
 		console.log("ERROR XHR");
 	}
-
-	var data = JSON.stringify(json_object);
-	xhr.send(data);
+	xhr.send(JSON.stringify(json_object));
 }
 
 function all_off(elt) {
@@ -152,103 +250,80 @@ function all_off(elt) {
 }
 
 function set_brightness(value) {
-	let target = document.getElementById("brightness_target");
-	let friendly_name = target.innerHTML;
+	let friendly_name = document.getElementById("brightness_target").dataset.name;
 	sendJSON({ name: friendly_name, update: JSON.stringify({ brightness: value }) });
 }
 
 function longclick(elt) {
-	if (elt.id.endsWith("_inner")) {
-		elt = elt.parentElement;
+	elt = elt.closest(".light");
+	if (!elt) {
+		return;
 	}
-
 	let friendly_name = elt.id.replaceAll("_", " ");
-		
 	let modal = document.querySelector(".modal");
 	let overlay = document.querySelector(".overlay");
 	modal.classList.remove("hidden");
 	overlay.classList.remove("hidden");
-	var rect = elt.getBoundingClientRect();
 	modal.style.top = window.scrollY + "px";
 	document.body.classList.add("stop-scrolling");
 	let target = document.getElementById("brightness_target");
-
-	target.innerHTML = friendly_name;
+	target.dataset.name = friendly_name;
+	target.textContent = friendly_name.split(" - 0x")[0];
 }
 
 function closemodal() {
-	let modal = document.querySelector(".modal");
-	let overlay = document.querySelector(".overlay");
-	modal.classList.add("hidden");
-	overlay.classList.add("hidden");
+	document.querySelector(".modal").classList.add("hidden");
+	document.querySelector(".overlay").classList.add("hidden");
 	document.body.classList.remove("stop-scrolling");
 }
-		
+
 function testclick(elt) {
 	let friendly_name = elt.id.replaceAll("_", " ");
-	console.debug("long press: " + longpress + " Friendly name: " + friendly_name); 
-
+	console.debug("long press: " + longpress + " Friendly name: " + friendly_name);
 	if (longpress) {
+		return;
+	}
+	if (elt.dataset.state != "on") {
+		sendJSON({ name: friendly_name, update: JSON.stringify({ state: "ON" }) });
 	} else {
-		if (elt.style.backgroundColor != "red") {
-			// elt.style.backgroundColor = "red";
-			sendJSON({ name: friendly_name, update: JSON.stringify({ state: "ON" }) });
-			// sendJSON({ name: friendly_name, update: JSON.stringify({ brightness: 255 }) });
-		} else {
-			// elt.style.backgroundColor = "white";
-			sendJSON({ name: friendly_name, update: JSON.stringify({ state: "OFF" }) });
-			// sendJSON({ name: friendly_name, update: JSON.stringify({ brightness: 0 }) });
-		};
+		sendJSON({ name: friendly_name, update: JSON.stringify({ state: "OFF" }) });
 	}
 }
 
-
-
 var presstimer = null;
-var longtarget = null;
-
 
 var cancel_func = function(e) {
-    if (presstimer !== null) {
-        clearTimeout(presstimer);
-        presstimer = null;
-    }
+	if (presstimer !== null) {
+		clearTimeout(presstimer);
+		presstimer = null;
+	}
 };
 
 var click_func = function(e) {
-    if (presstimer !== null) {
-        clearTimeout(presstimer);
-        presstimer = null;
-    }
-    if (longpress) {
-        return false;
-    }
-
-    // alert("press");
+	if (presstimer !== null) {
+		clearTimeout(presstimer);
+		presstimer = null;
+	}
+	if (longpress) {
+		return false;
+	}
 };
 
 var start_func = function(e) {
-    console.log(e);
-
-    if (e.type === "click" && e.button !== 0) {
-        return;
-    }
-
-    longpress = false;
-
-    if (presstimer === null) {
-        presstimer = setTimeout(function() {
-            // alert("long click");
-		longpress = true;
-		longclick(e.target);
-        }, 1000);
-    }
-
-    return false;
+	if (e.type === "click" && e.button !== 0) {
+		return;
+	}
+	longpress = false;
+	if (presstimer === null) {
+		presstimer = setTimeout(function() {
+			longpress = true;
+			longclick(e.target);
+		}, 1000);
+	}
+	return false;
 };
 
 function add_long_press(node) {
-	// console.log("Add long press: " + node);
 	node.addEventListener("mousedown", start_func);
 	node.addEventListener("touchstart", start_func);
 	node.addEventListener("click", click_func);
@@ -258,58 +333,53 @@ function add_long_press(node) {
 	node.addEventListener("touchcancel", cancel_func);
 }
 
-
 function body_init() {
-	var nodes = document.getElementsByTagName("DIV");
-	for (var i=0; i<nodes.length; i++) {        
+	// Only the light tiles open the brightness dialog on a long press.
+	var nodes = document.querySelectorAll(".light");
+	for (var i = 0; i < nodes.length; i++) {
 		add_long_press(nodes[i]);
 	}
 	setTimeout(request_state_updates, 300);
 }
 
-	</script>
-	</head>
-	<body onload="body_init()">
-		<div class="button" id="all_off" onclick="all_off(this)">Turn all off</div>
-		{{#each rooms as |room|}}
-		<h1>{{@key}}</h1>
-                    {{#each room.device_names as |devname|}}
-		    {{#with (lookup ../../devices devname) as |dev|}}
-		    <div class="button" id="{{dev.html_id}}" onclick="testclick(this)">{{dev.short_name}}
-			    <br/>
-			    <span id="{{dev.html_id}}_inner"></span>
-		    </div>
-
-		    {{/with}}
-                    {{/each}}
-
-
+</script>
+</head>
+<body onload="body_init()">
+	<div class="topbar">
+		<div class="button alloff" id="all_off" onclick="all_off(this)">Turn all off</div>
+		<div class="autodim">{{autodim_status}}</div>
+	</div>
+	{{#each rooms as |room|}}
+	<h1>{{@key}}</h1>
+	<div class="grid">
+		{{#each room.device_names as |devname|}}
+		{{#with (lookup ../../devices devname) as |dev|}}
+		<div class="button light" id="{{dev.html_id}}" data-state="pending" onclick="testclick(this)">
+			<span class="dot"></span>
+			<span class="name">{{dev.short_name}}</span>
+			<span class="level" id="{{dev.html_id}}_inner"></span>
+		</div>
+		{{/with}}
 		{{/each}}
+	</div>
+	{{/each}}
 
-		
 <section class="modal hidden">
-  <div class="flex">
-    <button class="btn-close" onclick="closemodal()">⨉</button>
-  </div>
-  <div>
-	  <h3>change brightness for <span id="brightness_target"></span></h3>
-    <p>
-    <div class="button" onclick="set_brightness(1)">1</div>
-    <div class="button" onclick="set_brightness(5)">5</div>
-    <div class="button" onclick="set_brightness(10)">10</div>
-    <div class="button" onclick="set_brightness(20)">20</div>
-    <div class="button" onclick="set_brightness(50)">50</div>
-    <div class="button" onclick="set_brightness(100)">100</div>
-    <div class="button" onclick="set_brightness(150)">150</div>
-    <div class="button" onclick="set_brightness(200)">200</div>
-    <div class="button" onclick="set_brightness(255)">255</div>
-    
-    </p>
-  </div>
-
-  <button class="btn" onclick="closemodal()">Close</button>
+	<button class="btn-close" onclick="closemodal()">⨉</button>
+	<h3>Brightness: <span id="brightness_target"></span></h3>
+	<div class="levels">
+		<div class="button" onclick="set_brightness(1)">min</div>
+		<div class="button" onclick="set_brightness(13)">5%</div>
+		<div class="button" onclick="set_brightness(25)">10%</div>
+		<div class="button" onclick="set_brightness(51)">20%</div>
+		<div class="button" onclick="set_brightness(76)">30%</div>
+		<div class="button" onclick="set_brightness(127)">50%</div>
+		<div class="button" onclick="set_brightness(191)">75%</div>
+		<div class="button" onclick="set_brightness(254)">100%</div>
+	</div>
+	<button class="btn" onclick="closemodal()">Close</button>
 </section>
 
-<div class="overlay hidden"></div>
-	</body>
+<div class="overlay hidden" onclick="closemodal()"></div>
+</body>
 </html>
