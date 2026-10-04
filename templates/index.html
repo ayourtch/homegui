@@ -13,8 +13,11 @@
   --line: #dedad2;
   --on: #f6b73c;
   --on-bg: #fff4dc;
-  --pending: #c9c5bd;
+  --gray-bg: #dcd9d3;
+  --gray-text: #8d8981;
   --danger: #c2412d;
+  --night: #3f4f8f;
+  --night-bg: #e6e9f6;
   --shadow: 0 1px 2px rgba(0,0,0,0.06), 0 2px 8px rgba(0,0,0,0.05);
 }
 @media (prefers-color-scheme: dark) {
@@ -26,8 +29,11 @@
     --line: #34312d;
     --on: #f6b73c;
     --on-bg: #3a2f17;
-    --pending: #4a4641;
+    --gray-bg: #2c2a28;
+    --gray-text: #6f6b64;
     --danger: #e0644f;
+    --night: #9fb0f0;
+    --night-bg: #262c45;
     --shadow: none;
   }
 }
@@ -107,8 +113,18 @@ div.button {
 .light[data-state="on"] { background: var(--on-bg); border-color: var(--on); }
 .light[data-state="on"] .dot { background: var(--on); box-shadow: 0 0 8px var(--on); }
 .light[data-state="off"] .level { visibility: hidden; }
-.light[data-state="pending"] { border-style: dashed; }
-.light[data-state="pending"] .dot { background: var(--pending); }
+/* not reported yet, or offline: clearly gray, not a white "off" tile */
+.light[data-state="pending"],
+.light[data-state="offline"] {
+  background: var(--gray-bg);
+  border-color: var(--gray-bg);
+  box-shadow: none;
+  color: var(--gray-text);
+}
+.light[data-state="pending"] .dot,
+.light[data-state="offline"] .dot { background: var(--gray-text); }
+.light[data-state="pending"] .level,
+.light[data-state="offline"] .level { visibility: visible; color: var(--gray-text); }
 
 .alloff {
   padding: 12px 20px;
@@ -119,6 +135,16 @@ div.button {
   font-weight: 600;
 }
 .alloff:active { background: var(--danger); color: #fff; }
+.actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.night {
+  padding: 12px 20px;
+  border-radius: 999px;
+  border: 1px solid var(--night);
+  color: var(--night);
+  background: var(--card);
+  font-weight: 600;
+}
+.night[data-on="true"] { background: var(--night); color: var(--card); }
 
 .modal {
   position: absolute;
@@ -215,10 +241,17 @@ function request_state_updates(json_object){
 				let elt = document.getElementById(item.html_id);
 				if (elt) {
 					try {
-						const payload = JSON.parse(item.last_payload);
+						const payload = item.last_payload ? JSON.parse(item.last_payload) : {};
 						let elt_in = document.getElementById(item.html_id + "_inner");
+						if (!item.available) {
+							elt.dataset.state = "offline";
+							if (elt_in) { elt_in.textContent = "offline"; }
+							return;
+						}
 						if (elt_in && payload.brightness !== undefined) {
 							elt_in.textContent = to_percent(payload.brightness);
+						} else if (elt_in && !item.last_payload) {
+							elt_in.textContent = "no report";
 						}
 						if (item.last_payload_update.secs_since_epoch >= item.last_req_sent.secs_since_epoch) {
 							if (payload.state == "ON") {
@@ -234,6 +267,7 @@ function request_state_updates(json_object){
 					}
 				}
 			});
+			show_night_mode(obj.night_mode);
 			setTimeout(request_state_updates, 300, { last_update: obj.last_update });
 		} else if (xhr.readyState === 4) {
 			setTimeout(request_state_updates, 3000);
@@ -243,6 +277,25 @@ function request_state_updates(json_object){
 		console.log("ERROR XHR");
 	}
 	xhr.send(JSON.stringify(json_object));
+}
+
+function show_night_mode(on) {
+	let btn = document.getElementById("night_mode");
+	btn.dataset.on = on ? "true" : "false";
+	btn.textContent = on ? "Night mode: on (tap to undo)" : "Night mode";
+}
+
+function toggle_night_mode(elt) {
+	let on = elt.dataset.on != "true";
+	let xhr = new XMLHttpRequest();
+	xhr.open("POST", "/night-mode", true);
+	xhr.setRequestHeader("Content-Type", "application/json");
+	xhr.onreadystatechange = function () {
+		if (xhr.readyState === 4 && xhr.status === 200) {
+			show_night_mode(JSON.parse(this.responseText).night_mode);
+		}
+	};
+	xhr.send(JSON.stringify({ on: on }));
 }
 
 function all_off(elt) {
@@ -339,6 +392,7 @@ function body_init() {
 	for (var i = 0; i < nodes.length; i++) {
 		add_long_press(nodes[i]);
 	}
+	show_night_mode(document.getElementById("night_mode").dataset.on == "true");
 	setTimeout(request_state_updates, 300);
 }
 
@@ -346,7 +400,10 @@ function body_init() {
 </head>
 <body onload="body_init()">
 	<div class="topbar">
-		<div class="button alloff" id="all_off" onclick="all_off(this)">Turn all off</div>
+		<div class="actions">
+			<div class="button alloff" id="all_off" onclick="all_off(this)">Turn all off</div>
+			<div class="button night" id="night_mode" data-on="{{night_mode}}" onclick="toggle_night_mode(this)">Night mode</div>
+		</div>
 		<div class="autodim">{{autodim_status}}</div>
 	</div>
 	{{#each rooms as |room|}}

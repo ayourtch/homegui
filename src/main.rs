@@ -2,7 +2,7 @@ use async_std::task;
 use rumqttc::{AsyncClient, MqttOptions, QoS};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::path::Path;
 use std::time::Duration;
@@ -119,15 +119,15 @@ fn autodim_targets(
     names
 }
 
-/// True when every light in  has reported a state since start. After a
-/// restart the replies to the startup "get" trickle in over minutes (measured
-/// 2026-10-04: 2 of 25 known at 60 s, 19 of 25 at 3 min), so dimming early would
-/// miss lights and still mark the day done.
+/// True when every light in `rooms` has reported a state since start or is offline.
+/// Dimming before that would miss lights and still mark the day done. An offline
+/// light never answers the startup "get" (measured 2026-10-04: the 6 lights that
+/// never reported were exactly the 6 zigbee2mqtt marks offline).
 fn room_states_known(devices: &HashMap<String, RenderDeviceEntry>, rooms: &[String]) -> bool {
     devices
         .values()
         .filter(|dev| rooms.iter().any(|r| r == &dev.room_name))
-        .all(|dev| !dev.last_payload.is_empty())
+        .all(|dev| !dev.last_payload.is_empty() || !dev.available)
 }
 
 fn autodim_status(cfg: &AutoDimConfig, done_today: bool) -> String {
@@ -143,7 +143,115 @@ fn autodim_status(cfg: &AutoDimConfig, done_today: bool) -> String {
     )
 }
 
-async fn autodim_loop(state: Arc<Mutex<AyTestState>>, client: AsyncClient, cfg: AutoDimConfig) {
+/// Night mode: the evening dim, forced or undone from the page. `saved` holds the
+/// brightness each dimmed light had before, for the undo. Memory only: after a
+/// restart the undo is lost and the lights stay as they are.
+#[derive(Debug, Clone, Default)]
+struct NightMode {
+    saved: Vec<(String, u64)>,
+}
+
+fn payload_of(dev: &RenderDeviceEntry) -> Value {
+    serde_json::from_str(&dev.last_payload).unwrap_or(Value::Null)
+}
+
+/// Lights to dim, each with its brightness now (for the undo).
+fn night_plan(
+    devices: &HashMap<String, RenderDeviceEntry>,
+    rooms: &[String],
+    level: u64,
+) -> Vec<(String, u64)> {
+    autodim_targets(devices, rooms, level)
+        .into_iter()
+        .filter_map(|name| {
+            let b = payload_of(devices.get(&name)?)["brightness"].as_u64()?;
+            Some((name, b))
+        })
+        .collect()
+}
+
+/// Lights to put back on undo: still ON and still at the dimmed level (a bulb may
+/// report a step off), so a light changed by hand since is left alone.
+fn restore_plan(
+    saved: &[(String, u64)],
+    devices: &HashMap<String, RenderDeviceEntry>,
+    level: u64,
+) -> Vec<(String, u64)> {
+    saved
+        .iter()
+        .filter(|(name, _)| {
+            devices.get(name).map_or(false, |dev| {
+                let p = payload_of(dev);
+                p["state"] == "ON"
+                    && p["brightness"].as_u64().map_or(false, |b| b.abs_diff(level) <= 2)
+            })
+        })
+        .cloned()
+        .collect()
+}
+
+fn publish_set(st: &mut AyTestState, name: &str, payload: String) {
+    if let Some(dev) = st.data.devices.get_mut(name) {
+        dev.last_req_sent = SystemTime::now();
+    }
+    let target = format!("zigbee2mqtt/{}/set", name);
+    let client = st.client.clone();
+    task::spawn(async move {
+        if let Err(e) = client
+            .publish(&target, QoS::AtMostOnce, false, payload.as_bytes())
+            .await
+        {
+            println!("publish to {} failed: {:?}", target, e);
+        }
+    });
+}
+
+/// Record that the dim ran today, in memory and in the flag file (atomic write).
+/// In memory too: if the file cannot be written it must not re-dim every 30 s.
+fn mark_ran_today(st: &mut AyTestState, today: &str) {
+    st.ran_on = Some(today.to_string());
+    let flag = st.autodim.flag_file.clone();
+    let tmp = format!("{}.tmp", &flag);
+    if let Err(e) = std::fs::write(&tmp, format!("{}\n", today)).and_then(|_| std::fs::rename(&tmp, &flag)) {
+        println!("autodim: cannot write flag file {}: {:?}", &flag, e);
+    }
+    st.data.autodim_status = autodim_status(&st.autodim, true);
+}
+
+/// Dim now. Also counts as today's run, so the automatic dim does not follow.
+fn night_on(st: &mut AyTestState, today: &str) -> Vec<String> {
+    let level = percent_to_level(st.autodim.brightness_percent);
+    let plan = night_plan(&st.data.devices, &st.autodim.rooms, level);
+    for (name, _) in &plan {
+        publish_set(st, name, format!("{{ \"brightness\": {} }}", level));
+    }
+    let night = st.night.get_or_insert_with(NightMode::default);
+    for (name, b) in &plan {
+        if !night.saved.iter().any(|(n, _)| n == name) {
+            night.saved.push((name.clone(), *b));
+        }
+    }
+    st.data.night_mode = true;
+    mark_ran_today(st, today);
+    plan.into_iter().map(|(name, _)| name).collect()
+}
+
+/// Undo: put the dimmed lights back. Today stays marked as done.
+fn night_off(st: &mut AyTestState) -> Vec<String> {
+    st.data.night_mode = false;
+    let Some(night) = st.night.take() else {
+        return vec![];
+    };
+    let level = percent_to_level(st.autodim.brightness_percent);
+    let plan = restore_plan(&night.saved, &st.data.devices, level);
+    for (name, b) in &plan {
+        publish_set(st, name, format!("{{ \"brightness\": {} }}", b));
+    }
+    plan.into_iter().map(|(name, _)| name).collect()
+}
+
+async fn autodim_loop(state: Arc<Mutex<AyTestState>>) {
+    let cfg = state.lock().await.autodim.clone();
     let at = match parse_hhmm(&cfg.time) {
         Some(at) => at,
         None => {
@@ -153,11 +261,7 @@ async fn autodim_loop(state: Arc<Mutex<AyTestState>>, client: AsyncClient, cfg: 
             return;
         }
     };
-    let level = percent_to_level(cfg.brightness_percent);
     let started = std::time::Instant::now();
-    // Also remembered in memory: if the flag file cannot be written, it must not
-    // re-dim every 30 s for the rest of the evening.
-    let mut ran_on: Option<String> = None;
     loop {
         let Some((today, now)) = local_now(&cfg.timezone) else {
             println!("autodim: cannot read the local time");
@@ -165,46 +269,21 @@ async fn autodim_loop(state: Arc<Mutex<AyTestState>>, client: AsyncClient, cfg: 
             continue;
         };
         let last_run = std::fs::read_to_string(&cfg.flag_file).ok();
-        let done_today = ran_on.as_deref() == Some(today.as_str())
-            || last_run.as_deref().map(str::trim) == Some(today.as_str());
         let mut st = state.lock().await;
+        let done_today = st.ran_on.as_deref() == Some(today.as_str())
+            || last_run.as_deref().map(str::trim) == Some(today.as_str());
         st.data.autodim_status = autodim_status(&cfg, done_today);
-        // Wait for the device list and for the lights to report their state. Some
-        // never answer the startup "get" (an unpowered lamp), so give up waiting
-        // after 10 minutes and dim the ones that did.
+        // Wait for the device list and for the lights to report their state. If
+        // availability is not published, give up waiting after 10 minutes and dim
+        // the ones that did report.
         let waited = started.elapsed();
         let ready = !st.data.devices.is_empty()
-            && waited >= Duration::from_secs(60)
+            && waited >= Duration::from_secs(5)
             && (room_states_known(&st.data.devices, &cfg.rooms)
                 || waited >= Duration::from_secs(600));
         if ready && !done_today && autodim_due(&today, now, at, last_run.as_deref()) {
-            let names = autodim_targets(&st.data.devices, &cfg.rooms, level);
-            let payload = format!("{{ \"brightness\": {} }}", level);
-            for name in &names {
-                if let Some(dev) = st.data.devices.get_mut(name) {
-                    dev.last_req_sent = SystemTime::now();
-                }
-                let target = format!("zigbee2mqtt/{}/set", name);
-                let client = client.clone();
-                let payload = payload.clone();
-                task::spawn(async move {
-                    if let Err(e) = client
-                        .publish(&target, QoS::AtMostOnce, false, payload.as_bytes())
-                        .await
-                    {
-                        println!("autodim: publish to {} failed: {:?}", target, e);
-                    }
-                });
-            }
-            println!("autodim: {} dimmed {} light(s) to {}: {:?}", today, names.len(), level, names);
-            ran_on = Some(today.clone());
-            let tmp = format!("{}.tmp", &cfg.flag_file);
-            if let Err(e) = std::fs::write(&tmp, format!("{}\n", today))
-                .and_then(|_| std::fs::rename(&tmp, &cfg.flag_file))
-            {
-                println!("autodim: cannot write flag file {}: {:?}", &cfg.flag_file, e);
-            }
-            st.data.autodim_status = autodim_status(&cfg, true);
+            let names = night_on(&mut st, &today);
+            println!("autodim: {} dimmed {} light(s): {:?}", today, names.len(), names);
         }
         drop(st);
         task::sleep(Duration::from_secs(30)).await;
@@ -255,6 +334,9 @@ struct RenderDeviceEntry {
     last_payload: String,
     last_payload_update: SystemTime,
     last_req_sent: SystemTime,
+    /// zigbee2mqtt availability; an offline light never answers a "get"
+    available: bool,
+    available_since: SystemTime,
 }
 
 fn get_render_device(d: &DeviceEntry) -> Option<RenderDeviceEntry> {
@@ -293,6 +375,8 @@ fn get_render_device(d: &DeviceEntry) -> Option<RenderDeviceEntry> {
         last_payload,
         last_payload_update,
         last_req_sent,
+        available: true,
+        available_since: SystemTime::UNIX_EPOCH,
     })
 }
 
@@ -306,6 +390,7 @@ struct RenderData {
     devices: HashMap<String, RenderDeviceEntry>,
     rooms: HashMap<String, RoomRenderData>,
     autodim_status: String,
+    night_mode: bool,
 }
 
 #[derive(Clone)]
@@ -314,6 +399,12 @@ struct AyTestState {
     registry: Handlebars<'static>,
     client: rumqttc::AsyncClient,
     data: RenderData,
+    autodim: AutoDimConfig,
+    /// date the dim last ran (auto or forced); also in `autodim.flag_file`
+    ran_on: Option<String>,
+    night: Option<NightMode>,
+    /// availability seen before the device list arrived (retained messages come first)
+    offline: HashSet<String>,
 }
 
 handlebars_helper!(devicealive: |dev: RenderDeviceEntry| dev.last_payload_update > dev.last_req_sent );
@@ -330,7 +421,12 @@ impl AyTestState {
                 rooms: HashMap::new(),
                 devices: HashMap::new(),
                 autodim_status: String::new(),
+                night_mode: false,
             },
+            autodim: AutoDimConfig::default(),
+            ran_on: None,
+            night: None,
+            offline: HashSet::new(),
         }
     }
 
@@ -396,6 +492,27 @@ async fn set_all_off(mut req: Request<Arc<Mutex<AyTestState>>>) -> tide::Result 
 }
 
 #[derive(Debug, Deserialize)]
+struct NightModeArgs {
+    on: bool,
+}
+
+async fn set_night_mode(mut req: Request<Arc<Mutex<AyTestState>>>) -> tide::Result {
+    let NightModeArgs { on } = req.body_json().await?;
+    let tz = req.state().lock().await.autodim.timezone.clone();
+    let mut st = req.state().lock().await;
+    let names = if on {
+        let Some((today, _)) = local_now(&tz) else {
+            return Err(tide::Error::from_str(500, "cannot read the local time"));
+        };
+        night_on(&mut st, &today)
+    } else {
+        night_off(&mut st)
+    };
+    println!("night mode {}: {:?}", if on { "on" } else { "off" }, names);
+    Ok(json!({ "night_mode": st.data.night_mode, "lights": names }).into())
+}
+
+#[derive(Debug, Deserialize)]
 struct GetStateArgs {
     last_update: SystemTime,
 }
@@ -410,12 +527,20 @@ async fn get_state(mut req: Request<Arc<Mutex<AyTestState>>>) -> tide::Result {
     let new_last_update = SystemTime::now();
 
     for (name, dev) in &state.data.devices {
-        if (dev.last_payload_update > last_update) || (dev.last_req_sent > last_update) {
+        if (dev.last_payload_update > last_update)
+            || (dev.last_req_sent > last_update)
+            || (dev.available_since > last_update)
+        {
             out.push(dev.clone());
         }
     }
 
-    Ok(json!({ "devices": out, "last_update": &new_last_update }).into())
+    Ok(json!({
+        "devices": out,
+        "last_update": &new_last_update,
+        "night_mode": state.data.night_mode,
+    })
+    .into())
 }
 
 async fn root_req(mut req: Request<Arc<Mutex<AyTestState>>>) -> tide::Result {
@@ -479,6 +604,10 @@ async fn main() {
         .subscribe("zigbee2mqtt/+", QoS::AtMostOnce)
         .await
         .unwrap();
+    client
+        .subscribe("zigbee2mqtt/+/availability", QoS::AtMostOnce)
+        .await
+        .unwrap();
 
     /*
      * let json_bytes: Vec<u8> = r#"{"brightness":56,"color":{"x":0.46187,"y":0.19485},"color_mode":"xy","color_temp":250,"state":"ON"}"#.into();
@@ -503,11 +632,12 @@ async fn main() {
         .unwrap();
 
     state.data.autodim_status = autodim_status(&config.autodim, false);
+    state.autodim = config.autodim.clone();
     let mut state = Arc::new(Mutex::new(state));
     let mut iot_state = state.clone();
 
     if config.autodim.enabled {
-        task::spawn(autodim_loop(state.clone(), client.clone(), config.autodim.clone()));
+        task::spawn(autodim_loop(state.clone()));
     }
 
     let mut app = tide::with_state(state);
@@ -516,6 +646,7 @@ async fn main() {
     app.at("/set-state").post(set_state);
     app.at("/set-all-off").post(set_all_off);
     app.at("/get-state").post(get_state);
+    app.at("/night-mode").post(set_night_mode);
 
     {
         let client = client.clone();
@@ -550,6 +681,9 @@ async fn main() {
                     let _ = client
                         .subscribe("zigbee2mqtt/+", QoS::AtMostOnce)
                         .await;
+                    let _ = client
+                        .subscribe("zigbee2mqtt/+/availability", QoS::AtMostOnce)
+                        .await;
                 }
                 rumqttc::Packet::Publish(publish) => {
                     if publish.topic == "zigbee2mqtt/bridge/devices" {
@@ -561,7 +695,7 @@ async fn main() {
 
                         for d in &devices {
                             let state = &mut iot_state.lock().await;
-                            if let Some(render_device) = get_render_device(&d) {
+                            if let Some(mut render_device) = get_render_device(&d) {
                                 println!("Insert: {:?}", &render_device);
                                 let friendly_name = render_device.device.friendly_name.clone();
                                 let has_key = { state.data.devices.get(&friendly_name).is_some() };
@@ -574,6 +708,7 @@ async fn main() {
                                     });
                                 if !has_key {
                                     room.device_names.push(friendly_name.clone());
+                                    render_device.available = !state.offline.contains(&friendly_name);
                                     state.data.devices.insert(friendly_name, render_device);
 
                                     let payload = format!("{{ \"state\": \"\" }}");
@@ -614,6 +749,27 @@ async fn main() {
                             */
                         }
                         println!("------");
+                    } else if let Some(name) = publish
+                        .topic
+                        .strip_prefix("zigbee2mqtt/")
+                        .and_then(|k| k.strip_suffix("/availability"))
+                    {
+                        // {"state":"online"}, or plain "online" from older zigbee2mqtt
+                        let s = String::from_utf8_lossy(&publish.payload);
+                        let online = serde_json::from_str::<Value>(&s)
+                            .ok()
+                            .and_then(|v| v["state"].as_str().map(|x| x == "online"))
+                            .unwrap_or(s.trim() == "online");
+                        let state = &mut iot_state.lock().await;
+                        if online {
+                            state.offline.remove(name);
+                        } else {
+                            state.offline.insert(name.to_string());
+                        }
+                        if let Some(dev) = state.data.devices.get_mut(name) {
+                            dev.available = online;
+                            dev.available_since = SystemTime::now();
+                        }
                     } else {
                         let key = publish.topic.clone().replace("zigbee2mqtt/", "");
                         if let Some(cfg) = config.actions.get(&key) {
@@ -764,6 +920,45 @@ mod tests {
         assert!(room_states_known(&devices, &rooms), "an unknown light in another room does not block");
         devices.extend([dev("Living Lamp - 0x02", "")]);
         assert!(!room_states_known(&devices, &rooms), "an unknown light in the room blocks");
+        devices.get_mut("Living Lamp - 0x02").unwrap().available = false;
+        assert!(room_states_known(&devices, &rooms), "an offline light does not block");
+    }
+
+    #[test]
+    fn night_plan_saves_brightness_and_undo_skips_changed_lights() {
+        let rooms = vec!["Living".to_string()];
+        let before: HashMap<String, RenderDeviceEntry> = [
+            dev("Living A - 0x01", r#"{"state":"ON","brightness":200}"#),
+            dev("Living B - 0x02", r#"{"state":"ON","brightness":254}"#),
+            dev("Living C - 0x03", r#"{"state":"ON","brightness":180}"#),
+            dev("Living D - 0x04", r#"{"state":"ON","brightness":50}"#),
+        ]
+        .into_iter()
+        .collect();
+        let saved = night_plan(&before, &rooms, 76);
+        let mut sorted = saved.clone();
+        sorted.sort();
+        assert_eq!(
+            sorted,
+            vec![
+                ("Living A - 0x01".to_string(), 200),
+                ("Living B - 0x02".to_string(), 254),
+                ("Living C - 0x03".to_string(), 180)
+            ]
+        );
+        let after: HashMap<String, RenderDeviceEntry> = [
+            dev("Living A - 0x01", r#"{"state":"ON","brightness":77}"#),
+            dev("Living B - 0x02", r#"{"state":"OFF","brightness":76}"#),
+            dev("Living C - 0x03", r#"{"state":"ON","brightness":150}"#),
+            dev("Living D - 0x04", r#"{"state":"ON","brightness":50}"#),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            restore_plan(&saved, &after, 76),
+            vec![("Living A - 0x01".to_string(), 200)],
+            "only A is still on at the dimmed level"
+        );
     }
 
     #[test]
