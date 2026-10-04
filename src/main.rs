@@ -38,8 +38,10 @@ pub struct Config {
 #[serde(default)]
 pub struct AutoDimConfig {
     enabled: bool,
-    /// "HH:MM", local time of this machine
+    /// "HH:MM" in `timezone`
     time: String,
+    /// TZ name for `time`; belair-living itself runs on UTC
+    timezone: String,
     brightness_percent: u8,
     /// room = first word of the friendly name ("Living Window - 0x..." is in "Living")
     rooms: Vec<String>,
@@ -51,6 +53,7 @@ impl Default for AutoDimConfig {
         Self {
             enabled: true,
             time: "22:00".to_string(),
+            timezone: "Europe/Brussels".to_string(),
             brightness_percent: 30,
             rooms: vec!["Living".to_string(), "Kitchen".to_string()],
             flag_file: "autodim-last-run".to_string(),
@@ -74,10 +77,11 @@ fn percent_to_level(percent: u8) -> u64 {
     (percent.min(100) as u64 * 254 + 50) / 100
 }
 
-/// Local date ("YYYY-MM-DD") and minutes since midnight, from the system clock and
-/// time zone (via `date`, so no time-zone crate is needed).
-fn local_now() -> Option<(String, u32)> {
+/// Date ("YYYY-MM-DD") and minutes since midnight in time zone `tz` (via `date`
+/// with TZ set, so no time-zone crate is needed).
+fn local_now(tz: &str) -> Option<(String, u32)> {
     let out = std::process::Command::new("date")
+        .env("TZ", tz)
         .arg("+%F %H:%M")
         .output()
         .ok()?;
@@ -155,7 +159,7 @@ async fn autodim_loop(state: Arc<Mutex<AyTestState>>, client: AsyncClient, cfg: 
     // re-dim every 30 s for the rest of the evening.
     let mut ran_on: Option<String> = None;
     loop {
-        let Some((today, now)) = local_now() else {
+        let Some((today, now)) = local_now(&cfg.timezone) else {
             println!("autodim: cannot read the local time");
             task::sleep(Duration::from_secs(30)).await;
             continue;
@@ -689,6 +693,13 @@ mod tests {
     }
 
     #[test]
+    fn now_follows_the_configured_zone() {
+        let (_, utc) = local_now("UTC").unwrap();
+        let (_, kiri) = local_now("Pacific/Kiritimati").unwrap(); // UTC+14, no DST
+        assert_eq!((utc + 14 * 60) % (24 * 60), kiri);
+    }
+
+    #[test]
     fn hhmm() {
         assert_eq!(parse_hhmm("22:00"), Some(1320));
         assert_eq!(parse_hhmm(" 7:05 "), Some(425));
@@ -760,6 +771,7 @@ mod tests {
         let c: Config = toml::from_str("mqtthost = \"x\"\n[actions]\n").unwrap();
         assert!(c.autodim.enabled);
         assert_eq!(c.autodim.time, "22:00");
+        assert_eq!(c.autodim.timezone, "Europe/Brussels");
         assert_eq!(c.autodim.brightness_percent, 30);
         let c: Config = toml::from_str(
             "mqtthost = \"x\"\n[actions]\n[autodim]\ntime = \"21:30\"\nbrightness_percent = 20\n",
